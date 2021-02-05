@@ -1,6 +1,6 @@
 import json
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Set, Optional
 
 import demistomock as demisto  # noqa: F401
 import urllib3
@@ -10,6 +10,10 @@ from CommonServerPython import *  # noqa: F401
 urllib3.disable_warnings()
 
 ''' CLIENT CLASS '''
+
+FETCH_MULTIPLICATION_FACTOR = 5
+SECONDS_BETWEEN_FETCHES = 2 * 60  # 2 minutes
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class Client(BaseClient):
@@ -263,6 +267,8 @@ def gh_set_policy_command(client: Client, args: Dict[str, Any]) -> CommandResult
 
 
 def gh_get_policy_command(client: Client, args: Dict[str, Any]) -> CommandResults:
+
+    demisto.info("[Dra1] -----START of gh_get_policy_command.------")
     policy_ids = argToList(args.get('policyid'))
     results = []
     if policy_ids:
@@ -288,6 +294,7 @@ def gh_get_policy_command(client: Client, args: Dict[str, Any]) -> CommandResult
         }
         policies.append(policy)
     policies_md = tableToMarkdown("Policy", policies, ["ID", "Name", "Enabled", "Description", "Actions"])
+    demisto.info("[Dra1] -----END of gh_get_policy_command.------")
 
     return CommandResults(
         readable_output=policies_md,
@@ -416,41 +423,87 @@ def gh_get_message_command(client: Client, args: Dict[str, Any]) -> CommandResul
         )
 
 
-def gh_get_phish_reports_command(client: Client, limit: int):
+def populate_incident(event, eventId_str):
+    incident = {}
+    incident['name'] = event.get("subject")
+    incident['occurred'] = event.get("timestamp")
+    incident['eventId'] = eventId_str
+    incident['rawJSON'] = json.dumps(event)
+    return incident
+
+
+def search_for_new_events(filter: List[Dict], client: Client, max_fetch: int, current_eventIds: Set[str]):
+    """
+    This method searched for events using specified filter and only adds new events to incidents
+    """
+    incidents = []
+    new_eventIds = set()
+    count_new_events = 0
+    got_all_new_events = False
+    count_fetched_per_call = max_fetch * FETCH_MULTIPLICATION_FACTOR
+    offset = 0
+    while not got_all_new_events:
+        results = client.search_events({"filters": filter, "limit": count_fetched_per_call, "offset": offset})
+        # increase offset
+        offset += count_fetched_per_call
+        events = results.get("results", [])
+        # if no more events found, we exit:
+        if not events:
+            break
+
+        for event in events:
+            if count_new_events >= max_fetch:
+                got_all_new_events = True
+                break
+            eventId_str = event.get("eventId", "0")
+            # if "event" is not in the current incidents, we create new incident for it:
+            if eventId_str != "0" and eventId_str not in current_eventIds:
+                count_new_events += 1
+                incident = populate_incident(event, eventId_str)
+                incidents.append(incident)
+                new_eventIds.add(eventId_str)
+
+    return incidents, new_eventIds
+
+
+def get_phish_reports(client: Client, max_fetch: int, current_eventIds: Set[str]):
+    # filter: List[Dict] = []
     filter = [
         {
             "workflow": "reported phish"
         }
     ]
-    results = client.search_events({"filters": filter, "limit": limit})
-    incidents = []
-    for event in results.get("results", []):
-        incident = {}
-        incident['name'] = event.get("subject")
-        incident['occurred'] = event.get("timestamp")
-        incident['rawJSON'] = json.dumps(event)
-        client.remediate_message("review", {"eventId": event.get("eventId", 0)})
-        incidents.append(incident)
-    return incidents
+    return search_for_new_events(filter, client, max_fetch, current_eventIds)
 
 
-def gh_get_quarantine_release_command(client: Client, limit: int):
+def get_quarantine_release(client: Client, max_fetch: int, current_eventIds: Set[str]):
     filter = [
         {
             "quarReleaseRequested": "True",
             "workflow": "unreviewed"
         }
     ]
-    results = client.search_events({"filters": filter, "limit": limit})
-    incidents = []
-    for event in results.get("results", []):
-        incident = {}
-        incident['name'] = event.get("subject")
-        incident['occurred'] = event.get("timestamp")
-        incident['rawJSON'] = json.dumps(event)
-        client.remediate_message("review", {"eventId": event.get("eventId", 0)})
-        incidents.append(incident)
-    return incidents
+    return search_for_new_events(filter, client, max_fetch, current_eventIds)
+
+
+def convert_to_comma_separated(eventIds: Set[str]) -> str:
+    result = ','.join(eventIds)
+    demisto.info('[Dra102]: Comma-separed result = {}'.format(result))
+    return result
+
+
+def convert_to_set(eventIds_str: str):
+    result = eventIds_str.split(',')
+    demisto.info('[Dra103]: Result = {}'.format(result))
+    return set(result)
+
+
+def get_time_difference_in_sec(last_time_str):
+    demisto.info("[----------Dra5-------] LAST_TIME (string): {}".format(last_time_str))
+    last_time = datetime.strptime(last_time_str, DATE_FORMAT)
+    time_difference_sec = (datetime.now() - last_time).total_seconds()
+    demisto.info("[----------Dra6-------] Difference in seconds is: {}".format(last_time_str))
+    return time_difference_sec
 
 
 ''' MAIN FUNCTION '''
@@ -479,7 +532,8 @@ def main():
     # out of the box by it, just pass ``proxy`` to the Client constructor
     proxy = demisto.params().get('proxy', False)
 
-    demisto.debug(f'Command being called is {demisto.command()}')
+    demisto.info(f'[Dra2] Command being called is {demisto.command()}')
+    demisto.info(f'[Dra100] Fetch_type is {fetch_type}')
     try:
         headers = {
             'Authorization': f'Bearer {api_key}'
@@ -514,26 +568,45 @@ def main():
             return_results(gh_search_message_command(client, demisto.args()))
 
         elif demisto.command() == 'fetch-incidents':
-            if fetch_type is not None:
-                last_run = demisto.getLastRun()
-                demisto.info("GOT LAST RUN: {}".format(last_run))
-                if not last_run.get("counter"):
-                    counter = 0
-                else:
-                    counter = int(last_run.get("counter"))
-                if counter % 3 == 0:
-                    if fetch_type == "phishing":
-                        incidents = gh_get_phish_reports_command(client, max_fetch)
-                    elif fetch_type == "quarantine":
-                        incidents = gh_get_quarantine_release_command(client, max_fetch)
-                    else:
-                        incidents_phish = gh_get_phish_reports_command(client, max_fetch)
-                        incidents_quarantine = gh_get_quarantine_release_command(client, max_fetch)
-                        incidents = incidents_phish
-                        incidents.extend(incidents_quarantine)
-                    demisto.incidents(incidents)
-                counter += 1
-                demisto.setLastRun({'max_phish_id': str(counter)})
+
+            last_run = demisto.getLastRun()
+            demisto.info("[Dra4] GOT LAST RUN: {}".format(last_run))
+
+            # if last_run exists, and there is a 'lastTime'
+            if last_run and 'lastTime' in last_run:
+                last_time_str = last_run.get('lastTime')
+                # if not enough time passed, return nothing and continue:
+                if get_time_difference_in_sec(last_time_str) < SECONDS_BETWEEN_FETCHES:
+                    demisto.info('-----------[Dra100]------- The time difference is smaller than 120 sec.')
+                    demisto.incidents([])
+                    return
+                # else, continue
+
+            if not last_run.get('eventIds'):
+                current_eventIds = set()
+            else:
+                current_eventIds = convert_to_set(last_run.get('eventIds'))
+                demisto.info('[Dra105]: EventIds = {}'.format(str(current_eventIds)))
+
+            if fetch_type == "phishing":
+                incidents, new_eventIds = get_phish_reports(client, max_fetch, current_eventIds)
+                current_eventIds.update(new_eventIds)
+            elif fetch_type == "quarantine":
+                incidents, new_eventIds = get_quarantine_release(client, max_fetch, current_eventIds)
+                current_eventIds.update(new_eventIds)
+            else:
+                incidents_phish, new_eventIds_phish = get_phish_reports(client, max_fetch, current_eventIds)
+                current_eventIds.update(new_eventIds_phish)
+                incidents = incidents_phish
+                incidents_quarantine, new_eventIds_quarantine = \
+                    get_quarantine_release(client, max_fetch, current_eventIds)
+                current_eventIds.update(new_eventIds_quarantine)
+                incidents.extend(incidents_quarantine)
+
+            demisto.incidents(incidents)
+            last_time = datetime.now()
+            last_time_str = last_time.strftime("%Y-%m-%d %H:%M:%S")
+            demisto.setLastRun({'eventIds': convert_to_comma_separated(current_eventIds), 'lastTime': last_time_str})
     # Log exceptions and return errors
     except Exception as e:
         demisto.error(traceback.format_exc())  # print the traceback

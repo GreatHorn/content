@@ -144,8 +144,8 @@ def test_gh_set_policy_command(requests_mock):
     assert response.outputs_key_field == 'id'
 
 
-def test_gh_get_phish_reports_command(requests_mock):
-    from GreatHorn import Client, gh_get_phish_reports_command
+def test_get_phish_reports(requests_mock):
+    from GreatHorn import Client, get_phish_reports
     mock_response = util_load_json('test_data/phish_response.json')
     mock_response2 = util_load_json('test_data/remediate_success.json')
     requests_mock.post('https://api.greathorn.com/v2/search/events', json=mock_response)
@@ -158,13 +158,13 @@ def test_gh_get_phish_reports_command(requests_mock):
             'Authentication': 'Bearer some_api_key'
         })
 
-    response = gh_get_phish_reports_command(client, 100)
+    response = get_phish_reports(client, 100, set())
 
-    assert len(response) == 1
+    assert len(response) == 2
 
 
-def test_gh_get_quarantine_release_command(requests_mock):
-    from GreatHorn import Client, gh_get_quarantine_release_command
+def test_get_quarantine_release(requests_mock):
+    from GreatHorn import Client, get_quarantine_release
     mock_response = util_load_json('test_data/release_response.json')
     mock_response2 = util_load_json('test_data/remediate_success.json')
     requests_mock.post('https://api.greathorn.com/v2/search/events', json=mock_response)
@@ -177,6 +177,6 @@ def test_gh_get_quarantine_release_command(requests_mock):
             'Authentication': 'Bearer some_api_key'
         })
 
-    response = gh_get_quarantine_release_command(client, 100)
+    response = get_quarantine_release(client, 100, set())
 
-    assert len(response) == 1
+    assert len(response) == 2
