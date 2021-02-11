@@ -14,6 +14,7 @@ urllib3.disable_warnings()
 FETCH_MULTIPLICATION_FACTOR = 5
 SECONDS_BETWEEN_FETCHES = 2 * 60  # 2 minutes
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_TOTAL_INCIDENTS = 300
 
 
 class Client(BaseClient):
@@ -268,7 +269,6 @@ def gh_set_policy_command(client: Client, args: Dict[str, Any]) -> CommandResult
 
 def gh_get_policy_command(client: Client, args: Dict[str, Any]) -> CommandResults:
 
-    demisto.info("[Dra1] -----START of gh_get_policy_command.------")
     policy_ids = argToList(args.get('policyid'))
     results = []
     if policy_ids:
@@ -294,7 +294,6 @@ def gh_get_policy_command(client: Client, args: Dict[str, Any]) -> CommandResult
         }
         policies.append(policy)
     policies_md = tableToMarkdown("Policy", policies, ["ID", "Name", "Enabled", "Description", "Actions"])
-    demisto.info("[Dra1] -----END of gh_get_policy_command.------")
 
     return CommandResults(
         readable_output=policies_md,
@@ -441,6 +440,8 @@ def search_for_new_events(filter: List[Dict], client: Client, max_fetch: int, cu
     count_new_events = 0
     got_all_new_events = False
     count_fetched_per_call = max_fetch * FETCH_MULTIPLICATION_FACTOR
+    count_fetched_per_call = count_fetched_per_call if count_fetched_per_call <= 200 else 200
+    demisto.info('Count_fetched_per_call = {}'.format(count_fetched_per_call))
     offset = 0
     while not got_all_new_events:
         results = client.search_events({"filters": filter, "limit": count_fetched_per_call, "offset": offset})
@@ -455,7 +456,7 @@ def search_for_new_events(filter: List[Dict], client: Client, max_fetch: int, cu
             if count_new_events >= max_fetch:
                 got_all_new_events = True
                 break
-            eventId_str = event.get("eventId", "0")
+            eventId_str = str(event.get("eventId", 0))
             # if "event" is not in the current incidents, we create new incident for it:
             if eventId_str != "0" and eventId_str not in current_eventIds:
                 count_new_events += 1
@@ -463,11 +464,13 @@ def search_for_new_events(filter: List[Dict], client: Client, max_fetch: int, cu
                 incidents.append(incident)
                 new_eventIds.add(eventId_str)
 
+    demisto.info('Number of new events = {}. '
+                 'New EventIds = {}'.format(len(new_eventIds), str(new_eventIds)))
+
     return incidents, new_eventIds
 
 
 def get_phish_reports(client: Client, max_fetch: int, current_eventIds: Set[str]):
-    # filter: List[Dict] = []
     filter = [
         {
             "workflow": "reported phish"
@@ -488,21 +491,17 @@ def get_quarantine_release(client: Client, max_fetch: int, current_eventIds: Set
 
 def convert_to_comma_separated(eventIds: Set[str]) -> str:
     result = ','.join(eventIds)
-    demisto.info('[Dra102]: Comma-separed result = {}'.format(result))
     return result
 
 
 def convert_to_set(eventIds_str: str):
     result = eventIds_str.split(',')
-    demisto.info('[Dra103]: Result = {}'.format(result))
     return set(result)
 
 
 def get_time_difference_in_sec(last_time_str):
-    demisto.info("[----------Dra5-------] LAST_TIME (string): {}".format(last_time_str))
     last_time = datetime.strptime(last_time_str, DATE_FORMAT)
     time_difference_sec = (datetime.now() - last_time).total_seconds()
-    demisto.info("[----------Dra6-------] Difference in seconds is: {}".format(last_time_str))
     return time_difference_sec
 
 
@@ -518,7 +517,7 @@ def main():
 
     api_key = demisto.params().get('apikey')
     fetch_type = demisto.params().get('fetch_type')
-    max_fetch = demisto.params().get('max_fetch')
+    max_fetch = int(demisto.params().get('max_fetch'))
 
     # get the service API url
     base_url = urljoin(demisto.params()['url'], demisto.params()['api_version'])
@@ -532,8 +531,7 @@ def main():
     # out of the box by it, just pass ``proxy`` to the Client constructor
     proxy = demisto.params().get('proxy', False)
 
-    demisto.info(f'[Dra2] Command being called is {demisto.command()}')
-    demisto.info(f'[Dra100] Fetch_type is {fetch_type}')
+    demisto.info(f'Command being called is {demisto.command()}. Fetch_type is {fetch_type}.')
     try:
         headers = {
             'Authorization': f'Bearer {api_key}'
@@ -568,25 +566,32 @@ def main():
             return_results(gh_search_message_command(client, demisto.args()))
 
         elif demisto.command() == 'fetch-incidents':
-
+            demisto.info("Calling fetch-incidents command.")
             last_run = demisto.getLastRun()
-            demisto.info("[Dra4] GOT LAST RUN: {}".format(last_run))
 
             # if last_run exists, and there is a 'lastTime'
             if last_run and 'lastTime' in last_run:
                 last_time_str = last_run.get('lastTime')
                 # if not enough time passed, return nothing and continue:
                 if get_time_difference_in_sec(last_time_str) < SECONDS_BETWEEN_FETCHES:
-                    demisto.info('-----------[Dra100]------- The time difference is smaller than 120 sec.')
+                    demisto.info('The time difference is smaller than {} s.'.format(SECONDS_BETWEEN_FETCHES))
                     demisto.incidents([])
                     return
-                # else, continue
+                else:  # else, continue
+                    demisto.info('Time difference is larger than {} sec. '
+                                 'Fetching incidents.'.format(SECONDS_BETWEEN_FETCHES))
 
             if not last_run.get('eventIds'):
                 current_eventIds = set()
             else:
                 current_eventIds = convert_to_set(last_run.get('eventIds'))
-                demisto.info('[Dra105]: EventIds = {}'.format(str(current_eventIds)))
+                demisto.info('Number of previous events = {}. '
+                             'EventIds = {}'.format(len(current_eventIds), str(current_eventIds)))
+
+            if len(current_eventIds) >= MAX_TOTAL_INCIDENTS:
+                demisto.info('Maximum number of incidents reached. Please resolve/delete some of the incidents.')
+                demisto.incidents([])
+                return
 
             if fetch_type == "phishing":
                 incidents, new_eventIds = get_phish_reports(client, max_fetch, current_eventIds)
@@ -606,7 +611,10 @@ def main():
             demisto.incidents(incidents)
             last_time = datetime.now()
             last_time_str = last_time.strftime("%Y-%m-%d %H:%M:%S")
+            demisto.info("New number of events to be written: {}. LastTime "
+                         "written to LastRun: {}.".format(len(current_eventIds), last_time_str))
             demisto.setLastRun({'eventIds': convert_to_comma_separated(current_eventIds), 'lastTime': last_time_str})
+
     # Log exceptions and return errors
     except Exception as e:
         demisto.error(traceback.format_exc())  # print the traceback

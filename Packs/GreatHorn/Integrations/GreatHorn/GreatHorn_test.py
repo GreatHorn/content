@@ -147,9 +147,7 @@ def test_gh_set_policy_command(requests_mock):
 def test_get_phish_reports(requests_mock):
     from GreatHorn import Client, get_phish_reports
     mock_response = util_load_json('test_data/phish_response.json')
-    mock_response2 = util_load_json('test_data/remediate_success.json')
     requests_mock.post('https://api.greathorn.com/v2/search/events', json=mock_response)
-    requests_mock.post('https://api.greathorn.com/v2/remediation/review', json=mock_response2)
 
     client = Client(
         base_url='https://api.greathorn.com/v2',
@@ -166,9 +164,7 @@ def test_get_phish_reports(requests_mock):
 def test_get_quarantine_release(requests_mock):
     from GreatHorn import Client, get_quarantine_release
     mock_response = util_load_json('test_data/release_response.json')
-    mock_response2 = util_load_json('test_data/remediate_success.json')
     requests_mock.post('https://api.greathorn.com/v2/search/events', json=mock_response)
-    requests_mock.post('https://api.greathorn.com/v2/remediation/review', json=mock_response2)
 
     client = Client(
         base_url='https://api.greathorn.com/v2',
@@ -180,3 +176,25 @@ def test_get_quarantine_release(requests_mock):
     response = get_quarantine_release(client, 100, set())
 
     assert len(response) == 2
+
+
+def test_convert_to_comma_separated():
+    from GreatHorn import convert_to_comma_separated
+    eventIds = set(["20314", "20315", "20320"])
+    result = convert_to_comma_separated(eventIds)
+    assert result == "20314,20315,20320" or result == "20314,20320,20315" or result == "20315,20314,20320" or \
+           result == "20315,20320,20314" or result == "20320,20314,20315" or result == "20320,20315,20314"
+
+
+def testconvert_to_set():
+    from GreatHorn import convert_to_set
+    eventIds_str = "20314,20315,20320"
+    result = convert_to_set(eventIds_str)
+    assert result == set(["20314", "20315", "20320"])
+
+
+def test_get_time_difference_in_sec():
+    from GreatHorn import get_time_difference_in_sec
+    last_time_str = "2021-01-01 09:10:30"
+    time_difference_sec = get_time_difference_in_sec(last_time_str)
+    assert time_difference_sec > 3500000

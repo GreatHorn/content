@@ -29,7 +29,7 @@ configuration:
   required: false
 - display: Maximum number of incidents to fetch at a time
   name: max_fetch
-  defaultvalue: 100
+  defaultvalue: 5
   type: 0
   required: false
 - display: Trust any certificate (not secure)
